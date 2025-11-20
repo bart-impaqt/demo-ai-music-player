@@ -2,8 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-// `music-metadata-browser` is large. Dynamically import it on the client
-// during runtime so it doesn't get bundled into server/serverless code.
 import LoadingScreen from "./components/LoadingScreen";
 
 type Track = {
@@ -21,7 +19,6 @@ export default function Player() {
   const [progress, setProgress] = useState(0);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
-  // Format seconds -> mm:ss
   const formatTime = (sec: number) => {
     if (!sec || sec === Infinity) return "00:00";
     const m = Math.floor(sec / 60);
@@ -29,90 +26,94 @@ export default function Player() {
     return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   };
 
-  // Load and parse tracks
+  // ✔︎ Helper to load metadata only when needed
+  async function loadTrack(file: string, parseBlob: any): Promise<Track> {
+    const url = "/music/" + file;
+    const blob = await fetch(url).then((r) => r.blob());
+
+    let metadata: any = null;
+    try {
+      metadata = await parseBlob(blob);
+    } catch {
+      metadata = null;
+    }
+
+    let cover: string | null = null;
+    if (metadata?.common?.picture?.length) {
+      const pic = metadata.common.picture[0];
+      const uint8 = new Uint8Array(pic.data);
+      let binary = "";
+      const chunkSize = 0x8000;
+      for (let i = 0; i < uint8.length; i += chunkSize) {
+        binary += String.fromCharCode.apply(
+          null,
+          Array.from(uint8.subarray(i, i + chunkSize))
+        );
+      }
+      cover = `data:${pic.format};base64,${btoa(binary)}`;
+    }
+
+    return {
+      file,
+      url,
+      title: metadata?.common?.title || file.replace(".mp3", ""),
+      artist: metadata?.common?.artist || "Unknown Artist",
+      duration: metadata?.format?.duration || 0,
+      cover,
+    };
+  }
+
+  // -----------------------------------------
+  // LOAD TRACKS (PRELOAD FIRST 3, REST LATER)
+  // -----------------------------------------
   useEffect(() => {
-    const loadTracks = async () => {
+    const load = async () => {
       const res = await fetch("/api/tracks");
       const files: string[] = await res.json();
 
-      const loadedTracks: Track[] = [];
+      const mod = await import("music-metadata-browser");
+      const parseBlob = mod.parseBlob;
 
-      // Import parser lazily on the client only
-      let parseBlob: typeof import("music-metadata-browser").parseBlob | null = null;
-      try {
-        const mod = await import("music-metadata-browser");
-        parseBlob = mod.parseBlob;
-      } catch (err) {
-        console.warn("Failed to load music-metadata-browser, skipping metadata", err);
-      }
+      // 🚀 PRELOAD FIRST 3 TRACKS
+      const toPreload = files.slice(0, 3);
+      const firstTracks = await Promise.all(
+        toPreload.map((f) => loadTrack(f, parseBlob))
+      );
 
-      for (const file of files) {
-        const url = "/music/" + file;
-        const blob = await fetch(url).then((r) => r.blob());
-
-        let metadata: any = null;
-        if (parseBlob) {
-          try {
-            metadata = await parseBlob(blob as any);
-          } catch (err) {
-            console.warn("Metadata error for", file, err);
-            metadata = null;
-          }
-        }
-
-        // Extract cover image (browser-safe base64 conversion)
-        let cover: string | null = null;
-        if (metadata?.common?.picture?.length) {
-          const pic = metadata.common.picture[0];
-          const uint8 = new Uint8Array(pic.data);
-          let binary = "";
-          const chunkSize = 0x8000;
-          for (let i = 0; i < uint8.length; i += chunkSize) {
-            binary += String.fromCharCode.apply(null, Array.from(uint8.subarray(i, i + chunkSize)));
-          }
-          const base64 = typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
-          cover = `data:${pic.format};base64,${base64}`;
-        }
-
-        loadedTracks.push({
-          file,
-          url,
-          title: metadata?.common?.title || file.replace(".mp3", ""),
-          artist: metadata?.common?.artist || "Unknown Artist",
-          duration: metadata?.format?.duration || 0,
-          cover,
-        });
-      }
-
-      // Shuffle like a real radio playlist
-      const shuffled = loadedTracks.sort(() => Math.random() - 0.5);
+      // Shuffle these first 3 to simulate radio
+      const shuffled = firstTracks.sort(() => Math.random() - 0.5);
 
       setTracks(shuffled);
       setCurrent(shuffled[0]);
+
+      // 🎧 BACKGROUND LOADING OF REMAINING TRACKS
+      const remaining = files.slice(3);
+      setTimeout(async () => {
+        for (const file of remaining) {
+          const track = await loadTrack(file, parseBlob);
+
+          // Append without disrupting playback
+          setTracks((prev) => [...prev, track]);
+        }
+      }, 50);
     };
 
-    loadTracks();
+    load();
   }, []);
 
-  // Next track function
   const playNext = () => {
     if (!current || tracks.length === 0) return;
-
     const idx = tracks.findIndex((t) => t.file === current.file);
     const next = tracks[(idx + 1) % tracks.length];
     setProgress(0);
     setCurrent(next);
   };
 
-  // Track progress listener
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    const update = () => {
-      setProgress(audio.currentTime);
-    };
-
+    const update = () => setProgress(audio.currentTime);
     audio.addEventListener("timeupdate", update);
     return () => audio.removeEventListener("timeupdate", update);
   }, [current]);
@@ -147,7 +148,10 @@ export default function Player() {
           <p className="text-md text-gray-600 mt-1">{current.artist}</p>
         </div>
 
-        <button className="px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition mt-6" onClick={playNext}>
+        <button
+          className="px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition mt-6"
+          onClick={playNext}
+        >
           ⏭
         </button>
 
