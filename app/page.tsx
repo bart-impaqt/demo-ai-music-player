@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { parseBlob } from "music-metadata-browser";
+// `music-metadata-browser` is large. Dynamically import it on the client
+// during runtime so it doesn't get bundled into server/serverless code.
 import LoadingScreen from "./components/LoadingScreen";
 
 type Track = {
@@ -36,32 +37,49 @@ export default function Player() {
 
       const loadedTracks: Track[] = [];
 
+      // Import parser lazily on the client only
+      let parseBlob: typeof import("music-metadata-browser").parseBlob | null = null;
+      try {
+        const mod = await import("music-metadata-browser");
+        parseBlob = mod.parseBlob;
+      } catch (err) {
+        console.warn("Failed to load music-metadata-browser, skipping metadata", err);
+      }
+
       for (const file of files) {
         const url = "/music/" + file;
         const blob = await fetch(url).then((r) => r.blob());
 
-        let metadata;
-        try {
-          metadata = await parseBlob(blob);
-        } catch (err) {
-          console.warn("Metadata error for", file, err);
-          metadata = null;
+        let metadata: any = null;
+        if (parseBlob) {
+          try {
+            metadata = await parseBlob(blob as any);
+          } catch (err) {
+            console.warn("Metadata error for", file, err);
+            metadata = null;
+          }
         }
 
-        // Extract cover image
+        // Extract cover image (browser-safe base64 conversion)
         let cover: string | null = null;
-        if (metadata?.common.picture?.length) {
+        if (metadata?.common?.picture?.length) {
           const pic = metadata.common.picture[0];
-          const base64 = Buffer.from(pic.data).toString("base64");
+          const uint8 = new Uint8Array(pic.data);
+          let binary = "";
+          const chunkSize = 0x8000;
+          for (let i = 0; i < uint8.length; i += chunkSize) {
+            binary += String.fromCharCode.apply(null, Array.from(uint8.subarray(i, i + chunkSize)));
+          }
+          const base64 = typeof btoa === "function" ? btoa(binary) : Buffer.from(binary, "binary").toString("base64");
           cover = `data:${pic.format};base64,${base64}`;
         }
 
         loadedTracks.push({
           file,
           url,
-          title: metadata?.common.title || file.replace(".mp3", ""),
-          artist: metadata?.common.artist || "Unknown Artist",
-          duration: metadata?.format.duration || 0,
+          title: metadata?.common?.title || file.replace(".mp3", ""),
+          artist: metadata?.common?.artist || "Unknown Artist",
+          duration: metadata?.format?.duration || 0,
           cover,
         });
       }
@@ -129,10 +147,9 @@ export default function Player() {
           <p className="text-md text-gray-600 mt-1">{current.artist}</p>
         </div>
 
-        {/* Duration display */}
-        <div className="mt-6 text-gray-700 text-lg font-medium">
-          {formatTime(progress)} / {formatTime(current.duration)}
-        </div>
+        <button className="px-4 py-2 bg-blue-600 text-white rounded-lg shadow-md hover:bg-blue-700 transition mt-6" onClick={playNext}>
+          ⏭
+        </button>
 
         <audio
           key={current.url}
